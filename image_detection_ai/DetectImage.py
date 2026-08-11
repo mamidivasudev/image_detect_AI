@@ -3,16 +3,20 @@ import torch
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
-from transformers import CLIPProcessor, CLIPModel
+from transformers import CLIPProcessor, CLIPModel, BlipProcessor, BlipForConditionalGeneration
 
 app = FastAPI()
 
-# Load the free open-source CLIP model once when the server starts
-print("Loading free AI model into memory...")
+# Load free open-source AI models (CLIP for Triage + BLIP for Captioning) once when server starts
+print("Loading free AI models into memory...")
 MODEL_NAME = "openai/clip-vit-base-patch32"
 model = CLIPModel.from_pretrained(MODEL_NAME)
 processor = CLIPProcessor.from_pretrained(MODEL_NAME)
-print("Model loaded successfully!")
+
+CAPTION_MODEL_NAME = "Salesforce/blip-image-captioning-base"
+caption_processor = BlipProcessor.from_pretrained(CAPTION_MODEL_NAME)
+caption_model = BlipForConditionalGeneration.from_pretrained(CAPTION_MODEL_NAME)
+print("AI models loaded successfully!")
 
 CATEGORY_DESCRIPTIONS = {
     "Bridge damaged":    "A photo of a cracked, broken, or structurally damaged bridge over water or road.",
@@ -49,6 +53,7 @@ HTML_CONTENT = """
         #uploadPrompt { margin: 0; font-size: 14px; }
         #loading { display: none; text-align: center; font-weight: bold; margin: 0; color: #4a5568; padding: 20px; background: white; border-radius: 12px; }
         #result { display: none; padding: 20px; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .description-box { background: rgba(255, 255, 255, 0.6); border-left: 4px solid #3182ce; padding: 10px 12px; border-radius: 6px; margin-bottom: 15px; font-size: 13px; color: #2d3748; }
         .status-APPROVED { background: #c6f6d5 !important; color: #22543d; border-left: 5px solid #38a169; }
         .status-REJECTED { background: #fed7d7 !important; color: #742a2a; border-left: 5px solid #e53e3e; }
         .status-REVIEW { background: #feebc8 !important; color: #744210; border-left: 5px solid #dd6b20; }
@@ -103,11 +108,19 @@ HTML_CONTENT = """
 
         <div id="result" class="card" style="width: 100%;">
             <h3 id="decisionTitle" style="margin-top:0; margin-bottom: 10px; font-size: 18px;">Decision: APPROVED</h3>
-            <p id="decisionReason" style="margin-top:0; margin-bottom:15px; font-size: 13px; line-height: 1.4;"></p>
+            <p id="decisionReason" style="margin-top:0; margin-bottom:12px; font-size: 13px; line-height: 1.4;"></p>
+            
+            <div id="descriptionBox" class="description-box" style="display:none;">
+                <strong>🖼️ AI Image Description:</strong> <span id="imageDescText"></span>
+            </div>
             
             <div class="metric">
-                <div class="metric-title"><span>🛣️ Outdoor Road/Infrastructure Score:</span> <span id="valRoad">0%</span></div>
+                <div class="metric-title"><span id="lblSelectedCategory">🎯 Selected Category Match:</span> <span id="valRoad">0%</span></div>
                 <div class="score-bar"><div id="barRoad" class="score-fill"></div></div>
+            </div>
+            <div class="metric" id="bestMatchMetric" style="display:none;">
+                <div class="metric-title"><span id="lblBestCategory">🏆 Top Matching Damage Category:</span> <span id="valBest">0%</span></div>
+                <div class="score-bar"><div id="barBest" class="score-fill" style="background:#38a169;"></div></div>
             </div>
             <div class="metric">
                 <div class="metric-title"><span>🏠 Indoor Home/Furniture Score:</span> <span id="valIndoor">0%</span></div>
@@ -180,11 +193,31 @@ async function runAnalysis() {
         document.getElementById('decisionTitle').innerText = 'System Decision: ' + data.decision;
         document.getElementById('decisionReason').innerText = data.reason;
         
+        if (data.description) {
+            document.getElementById('imageDescText').innerText = data.description;
+            document.getElementById('descriptionBox').style.display = 'block';
+        } else {
+            document.getElementById('descriptionBox').style.display = 'none';
+        }
+        
+        const catName = document.getElementById('categorySelect').value;
+        document.getElementById('lblSelectedCategory').innerText = "🎯 Selected Category ('" + catName + "') Score:";
         document.getElementById('valRoad').innerText = data.scores.road.toFixed(1) + '%';
+        document.getElementById('barRoad').style.width = data.scores.road + '%';
+        
+        if (data.best_match && data.best_match !== catName && data.all_scores && data.all_scores[data.best_match]) {
+            const bestScore = data.all_scores[data.best_match];
+            document.getElementById('lblBestCategory').innerText = "🏆 Top Match ('" + data.best_match + "') Score:";
+            document.getElementById('valBest').innerText = bestScore.toFixed(1) + '%';
+            document.getElementById('barBest').style.width = bestScore + '%';
+            document.getElementById('bestMatchMetric').style.display = 'block';
+        } else {
+            document.getElementById('bestMatchMetric').style.display = 'none';
+        }
+        
         document.getElementById('valIndoor').innerText = data.scores.indoor.toFixed(1) + '%';
         document.getElementById('valRandom').innerText = data.scores.random.toFixed(1) + '%';
         
-        document.getElementById('barRoad').style.width = data.scores.road + '%';
         document.getElementById('barIndoor').style.width = data.scores.indoor + '%';
         document.getElementById('barRandom').style.width = data.scores.random + '%';
         
@@ -202,12 +235,18 @@ async function runAnalysis() {
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
     """Serves the simple HTML interaction interface."""
-    return HTML_CONTENT
+    return HTMLResponse(content=HTML_CONTENT, status_code=200, media_type="text/html; charset=utf-8")
 
 @app.post("/predict")
 async def predict_triage(file: UploadFile = File(...), category_name: str = Form("DEGREDED ROADS")):
     """Receives file upload, scores it using local CLIP model, returns data metrics."""
     image = Image.open(file.file).convert("RGB")
+
+    # ✅ STEP 0: Generate AI natural language description using Salesforce BLIP
+    caption_inputs = caption_processor(image, return_tensors="pt")
+    with torch.no_grad():
+        caption_ids = caption_model.generate(**caption_inputs, max_new_tokens=50)
+        image_description = caption_processor.decode(caption_ids[0], skip_special_tokens=True).capitalize()
 
     # ✅ STEP 1: Check against ALL 11 damage categories + indoor + random
     # This lets us find WHICH damage type the image best matches
@@ -263,6 +302,7 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
     return {
         "decision": decision,
         "reason": reason,
+        "description": image_description,
         "best_match": best_match_label,
         "scores": {
             "road":   round(selected_score, 1),
