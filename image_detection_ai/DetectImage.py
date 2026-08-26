@@ -238,6 +238,7 @@ async def serve_dashboard():
     return HTMLResponse(content=HTML_CONTENT, status_code=200, media_type="text/html; charset=utf-8")
 
 @app.post("/predict")
+@app.post("/check_image_status")
 async def predict_triage(file: UploadFile = File(...), category_name: str = Form("DEGREDED ROADS")):
     """Receives file upload, scores it using local CLIP model, returns data metrics."""
     image = Image.open(file.file).convert("RGB")
