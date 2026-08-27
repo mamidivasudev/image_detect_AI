@@ -249,14 +249,15 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
         caption_ids = caption_model.generate(**caption_inputs, max_new_tokens=50)
         image_description = caption_processor.decode(caption_ids[0], skip_special_tokens=True).capitalize()
 
-    # ✅ STEP 1: Check against ALL 11 damage categories + indoor + random
+    # ✅ STEP 1: Check against ALL 11 damage categories + indoor + random + normal road
     # This lets us find WHICH damage type the image best matches
     all_queries = list(CATEGORY_DESCRIPTIONS.values()) + [
         "A photo taken inside a house, bedroom, kitchen, office, or any indoor space with furniture.",
-        "A selfie, portrait, person's face, pet animal, food item, paper document, receipt, or blurry image."
+        "A selfie, portrait, person's face, pet animal, food item, paper document, receipt, or blurry image.",
+        "A photo of a clean, smooth, well-maintained, undamaged road or highway in perfect condition with no damage."
     ]
 
-    all_labels = list(CATEGORY_DESCRIPTIONS.keys()) + ["INDOOR", "RANDOM"]
+    all_labels = list(CATEGORY_DESCRIPTIONS.keys()) + ["INDOOR", "RANDOM", "NORMAL_ROAD"]
 
     inputs = processor(text=all_queries, images=image, return_tensors="pt", padding=True)
 
@@ -270,12 +271,13 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
     score_map = {label: round(scores[i] * 100, 1) for i, label in enumerate(all_labels)}
 
     # Selected category score
-    selected_score = score_map.get(category_name, 0)
-    indoor_score   = score_map.get("INDOOR", 0)
-    random_score   = score_map.get("RANDOM", 0)
+    selected_score  = score_map.get(category_name, 0)
+    indoor_score    = score_map.get("INDOOR", 0)
+    random_score    = score_map.get("RANDOM", 0)
+    normal_road_score = score_map.get("NORMAL_ROAD", 0)
 
-    # Best matching damage category (excluding indoor/random)
-    road_scores = {k: v for k, v in score_map.items() if k not in ["INDOOR", "RANDOM"]}
+    # Best matching damage category (excluding indoor/random/normal_road)
+    road_scores = {k: v for k, v in score_map.items() if k not in ["INDOOR", "RANDOM", "NORMAL_ROAD"]}
     best_match_label = max(road_scores, key=road_scores.get)
     best_match_score = road_scores[best_match_label]
 
@@ -284,6 +286,11 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
         # Clearly fake/indoor/random image
         decision = "REJECTED"
         reason = f"Image appears to be indoor or irrelevant. Not a valid road damage photo."
+
+    elif normal_road_score > selected_score:
+        # Image looks like a normal undamaged road — not actually damaged
+        decision = "REJECTED"
+        reason = f"Image appears to be a normal undamaged road (normal road score: {normal_road_score}%). No visible damage matching '{category_name}'."
 
     elif best_match_label == category_name and selected_score > 15:
         # Image best matches the selected category ✅
