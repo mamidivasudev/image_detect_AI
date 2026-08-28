@@ -253,11 +253,12 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
     # This lets us find WHICH damage type the image best matches
     all_queries = list(CATEGORY_DESCRIPTIONS.values()) + [
         "A photo taken inside a house, bedroom, kitchen, office, or any indoor space with furniture.",
-        "A selfie, portrait, person's face, pet animal, food item, paper document, receipt, or blurry image.",
-        "A photo of a clean, smooth, well-maintained, undamaged road or highway in perfect condition with no damage."
+        "A selfie, portrait, person's face, pet animal, food item, paper document, or receipt.",
+        "A photo of a clean, smooth, well-maintained, undamaged road or highway in perfect condition with no damage.",
+        "A very blurry, out of focus, shaky, or low quality image where it is hard to see details clearly."
     ]
 
-    all_labels = list(CATEGORY_DESCRIPTIONS.keys()) + ["INDOOR", "RANDOM", "NORMAL_ROAD"]
+    all_labels = list(CATEGORY_DESCRIPTIONS.keys()) + ["INDOOR", "RANDOM", "NORMAL_ROAD", "BLURRY"]
 
     inputs = processor(text=all_queries, images=image, return_tensors="pt", padding=True)
 
@@ -270,14 +271,14 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
     # Map label → score
     score_map = {label: round(scores[i] * 100, 1) for i, label in enumerate(all_labels)}
 
-    # Selected category score
     selected_score  = score_map.get(category_name, 0)
     indoor_score    = score_map.get("INDOOR", 0)
     random_score    = score_map.get("RANDOM", 0)
     normal_road_score = score_map.get("NORMAL_ROAD", 0)
+    blurry_score    = score_map.get("BLURRY", 0)
 
-    # Best matching damage category (excluding indoor/random/normal_road)
-    road_scores = {k: v for k, v in score_map.items() if k not in ["INDOOR", "RANDOM", "NORMAL_ROAD"]}
+    # Best matching damage category (excluding indoor/random/normal_road/blurry)
+    road_scores = {k: v for k, v in score_map.items() if k not in ["INDOOR", "RANDOM", "NORMAL_ROAD", "BLURRY"]}
     best_match_label = max(road_scores, key=road_scores.get)
     best_match_score = road_scores[best_match_label]
 
@@ -286,6 +287,11 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
         # Clearly fake/indoor/random image
         decision = "REJECTED"
         reason = f"Image appears to be indoor or irrelevant. Not a valid road damage photo."
+
+    elif blurry_score > 10:
+        # Image is too blurry
+        decision = "REVIEW"
+        reason = f"Image is too blurry or out of focus (blurry score: {blurry_score}%). Needs manual review."
 
     elif normal_road_score > selected_score:
         # Image looks like a normal undamaged road — not actually damaged
