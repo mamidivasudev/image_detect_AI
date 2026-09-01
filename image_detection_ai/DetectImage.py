@@ -252,8 +252,8 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
     # ✅ STEP 1: Check against ALL 11 damage categories + indoor + random + normal road
     # This lets us find WHICH damage type the image best matches
     all_queries = list(CATEGORY_DESCRIPTIONS.values()) + [
-        "A photo taken inside a house, bedroom, kitchen, office, or any indoor space with furniture.",
-        "A selfie, portrait, person's face, pet animal, food item, paper document, or receipt.",
+        "A photo taken inside a house, bedroom, kitchen, office, or any indoor space with furniture, appliances, or household items.",
+        "A selfie, portrait, person's face, pet animal, food item, clothing, paper document, receipt, toys, tools, cups, bottles, close-up of electronics, keyboard, laptop, phone, or computer screen.",
         "A photo of a clean, smooth, well-maintained, undamaged road or highway in perfect condition with no damage.",
         "A very blurry, out of focus, shaky, or low quality image where it is hard to see details clearly."
     ]
@@ -283,7 +283,12 @@ async def predict_triage(file: UploadFile = File(...), category_name: str = Form
     best_match_score = road_scores[best_match_label]
 
     # ✅ STEP 2: Decision logic
-    if indoor_score > 30 or random_score > 30:
+    if (indoor_score + random_score) > best_match_score and (indoor_score + random_score) > 10:
+        # Looks more like indoor/random than any road damage
+        decision = "REJECTED"
+        reason = f"Image appears to be indoor or irrelevant. Not a valid road damage photo."
+        
+    elif indoor_score > 30 or random_score > 30:
         # Clearly fake/indoor/random image
         decision = "REJECTED"
         reason = f"Image appears to be indoor or irrelevant. Not a valid road damage photo."
